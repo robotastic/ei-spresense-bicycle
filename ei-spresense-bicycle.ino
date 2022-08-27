@@ -57,8 +57,8 @@ static SDClass  theSD;
 #define PICTURE_SIGNALLING_OFF  LED0_OFF                      /* Switch off LED when taken photo */
 
 #define SCALE_FACTOR 1
-#define RAW_WIDTH CAM_IMGSIZE_QVGA_H
-#define RAW_HEIGHT CAM_IMGSIZE_QVGA_V
+#define RAW_WIDTH EI_CLASSIFIER_INPUT_WIDTH  //CAM_IMGSIZE_QVGA_H
+#define RAW_HEIGHT EI_CLASSIFIER_INPUT_HEIGHT  //CAM_IMGSIZE_QVGA_V
 #define CLIP_WIDTH (EI_CLASSIFIER_INPUT_WIDTH * SCALE_FACTOR)
 #define CLIP_HEIGHT (EI_CLASSIFIER_INPUT_HEIGHT * SCALE_FACTOR)
 /*
@@ -84,6 +84,8 @@ float score = 0;
 /* prototypes */
 void printError(enum CamErr err);
 void CamCB(CamImage img);
+float features[25600]; 
+
 
 /**
    @brief      Convert monochrome data to rgb values
@@ -173,6 +175,18 @@ int ei_camera_cutout_get_data(size_t offset, size_t length, float *out_ptr) {
 
 #endif
 
+int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
+    memcpy(out_ptr, features + offset, length * sizeof(float));
+    return 0;
+}
+
+void r565_to_rgb(uint16_t color, uint8_t *r, uint8_t *g, uint8_t *b) 
+{
+    *r = (color & 0xF800) >> 8;
+    *g = (color & 0x07E0) >> 3;
+    *b = (color & 0x1F) << 3;
+}
+
 /**
    Print error message
 */
@@ -222,12 +236,9 @@ void printError(enum CamErr err)
 static void ei_wildlife_camera_classify(bool debug) {
   ei::signal_t signal;
   spotted_object = false;
-  signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
-  signal.get_data = &ei_camera_cutout_get_data;
+  signal.total_length =  sizeof(features) / sizeof(features[0]);
+  signal.get_data = &raw_feature_get_data; //&ei_camera_cutout_get_data;
 
-LED1_OFF
-LED2_OFF
-LED3_OFF
 score = 0;
   EI_IMPULSE_ERROR err = run_classifier(&signal, &ei_result, DEBUG_NN);
   if (err != EI_IMPULSE_OK) {
@@ -240,6 +251,10 @@ score = 0;
               ei_result.timing.dsp, ei_result.timing.classification, ei_result.timing.anomaly);
 #if EI_CLASSIFIER_OBJECT_DETECTION == 1
     bool bb_found = ei_result.bounding_boxes[0].value > 0;
+    
+LED1_OFF
+LED2_OFF
+LED3_OFF
     for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
       auto bb = ei_result.bounding_boxes[ix];
       if (bb.value > score) {
@@ -285,6 +300,9 @@ score = 0;
   return;
 }
 
+
+
+
 /**
  * @brief callback that checks for the presence of an animal in the camera preview window, and then 
  *   executes ei_wildlife_camera_snapshot() if found
@@ -294,43 +312,29 @@ void CamCB(CamImage img)
 
   if (!img.isAvailable()) return; // fast path if image is no longer ready
   CamErr err;
+
+    memcpy(features, img.getImgBuff(), img.getImgSize());
+
+    uint8_t r, g, b;
+    for(int i = 0; i<25600; i++)
+    {
+      r565_to_rgb(features[i], &r, &g, &b);
+      // then convert to out_ptr format
+      float pixel_f = (r << 16) + (g << 8) + b;
+      features[i] = pixel_f;
+    }
+
+
   Serial.println("INFO: new frame processing...");
-
-  // resize and convert image to grayscale to prepare for inferencing
-  /*
-  err = img.clipAndResizeImageByHW(sized_img
-                                   , OFFSET_X, OFFSET_Y
-                                   , OFFSET_X + CLIP_WIDTH - 1
-                                   , OFFSET_Y + CLIP_HEIGHT - 1
-                                   , EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT);*/
-
-    
-    err = img.clipAndResizeImageByHW(sized_img
-                                   , OFFSET_X, OFFSET_Y
-                                   , OFFSET_X + RAW_WIDTH - 1
-                                   , OFFSET_Y + RAW_HEIGHT - 1
-                                   , EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT);
-  
-  
-  if (err) printError(err);
-  ei_printf("convert format:\n");
-  
-  #if GRAYSCALE == true
-  err = sized_img.convertPixFormat(CAM_IMAGE_PIX_FMT_GRAY);
-  #else
-  err = sized_img.convertPixFormat(CAM_IMAGE_PIX_FMT_RGB565);
-  #endif
-
-  if (err) printError(err);
 
  LED0_ON
   ei_printf("classify picture:\n");
   // get inference results on resized grayscale image
   ei_wildlife_camera_classify(true);
 
-  if (spotted_object) {
+  //if (spotted_object) {
     ei_wildlife_camera_snapshot(true);
-  }
+  //}
   LED0_OFF
 }
 
@@ -340,7 +344,7 @@ void CamCB(CamImage img)
 void ei_wildlife_camera_start_continuous(bool debug) {
   CamErr err;
   ei_printf("Starting the camera:\n");
-  err = theCamera.begin(1, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,CAM_IMAGE_PIX_FMT_YUV422);
+  err = theCamera.begin(1, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,CAM_IMAGE_PIX_FMT_RGB565);
   
   //err = theCamera.begin(1, CAM_VIDEO_FPS_5, EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT,CAM_IMAGE_PIX_FMT_YUV422);
   if (err && debug) printError(err);
@@ -356,7 +360,7 @@ void ei_wildlife_camera_start_continuous(bool debug) {
 
   ei_printf("Set format:\n");
   // still image format must be jpeg to allow for compressed storage/transmit
-  err = theCamera.setStillPictureImageFormat( RAW_WIDTH,RAW_HEIGHT, CAM_IMAGE_PIX_FMT_JPG);
+  err = theCamera.setStillPictureImageFormat( CAM_IMGSIZE_QVGA_H,CAM_IMGSIZE_QVGA_V, CAM_IMAGE_PIX_FMT_JPG);
     //CAM_IMAGE_PIX_FMT_YUV422);
     //CAM_IMAGE_PIX_FMT_RGB565);
     //CAM_IMAGE_PIX_FMT_GRAY);
@@ -377,7 +381,8 @@ void ei_wildlife_camera_snapshot(bool debug)
   // snapshot and save a jpeg
   CamImage img = theCamera.takePicture();
   if (theSD.begin() && img.isAvailable()) {
-    sprintf(filename, "capture.%d.%f.jpg", take_picture_count,score);
+    int short_score = floor(score*100);
+    sprintf(filename, "%d-%d.jpg", take_picture_count,short_score);
     if (debug) ei_printf("INFO: saving %s to SD card...", filename);
     theSD.remove(filename);
     File myFile = theSD.open(filename, FILE_WRITE);
