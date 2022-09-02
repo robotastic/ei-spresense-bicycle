@@ -227,15 +227,19 @@ static void ei_wildlife_camera_classify(bool debug) {
     LED1_OFF
     LED2_OFF
     LED3_OFF
+
+    spotted_object = true;
+    
     for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
       auto bb = ei_result.bounding_boxes[ix];
       if (bb.value > score) {
         score = bb.value;
       }
+      
       if (bb.value == 0) {
         continue;
       }
-      if (bb.value > 0.5) {
+      if (bb.value > 0.2) {
         spotted_object = true;
       }
       if (bb.value > 0.7) {
@@ -352,7 +356,7 @@ ei_wildlife_camera_classify(true);
 
   LED0_ON
 
-  if (theSD.begin() && sized_img.isAvailable()) {
+  if (spotted_object && theSD.begin() && sized_img.isAvailable()) {
     int short_score = floor(score * 100);
     /*sprintf(filename, "%d-%d.rgb", take_picture_count, short_score);
     if (debug)
