@@ -130,15 +130,15 @@ void r565_to_rgb(uint16_t color, uint8_t *r, uint8_t *g, uint8_t *b) {
 
 // this is from the Nano BLE example
 int ei_camera_cutout_get_data(size_t offset, size_t length, float *out_ptr) {
-    size_t pixel_ix = offset * 2; 
-    size_t bytes_left = length;
+    size_t byte_ix = offset * 2; 
+    size_t pixels_left = length;
     size_t out_ptr_ix = 0;
      // grab the value and convert to r/g/b
     uint8_t *buffer = sized_img.getImgBuff();
     // read byte for byte
-    while (bytes_left != 0) {
+    while (pixels_left != 0) {
 
-        uint16_t pixel = (buffer[pixel_ix] << 8) | buffer[pixel_ix+1];
+        uint16_t pixel = (buffer[byte_ix] << 8) | buffer[byte_ix+1];
         uint8_t r, g, b;
         r = ((pixel >> 11) & 0x1f) << 3;
         g = ((pixel >> 5) & 0x3f) << 2;
@@ -150,8 +150,8 @@ int ei_camera_cutout_get_data(size_t offset, size_t length, float *out_ptr) {
 
         // and go to the next pixel
         out_ptr_ix++;
-        pixel_ix+=2;
-        bytes_left--;
+        byte_ix+=2;
+        pixels_left--;
     }
 
     // and done!
