@@ -79,16 +79,6 @@ static SDClass theSD;
 
 // enable for very verbose logging from edge impulse sdk
 #define DEBUG_NN false
-#define GRAYSCALE false
-
-#define CLASSIFIER_THRESHOLD 0.7
-#define CLASSIFIER_ANIMAL_INDEX 0
-#define FEATURE_SIZE 9216
-
-
-
-/* static variables */
-static CamImage sized_img;
 
 /*
 ** @brief points to the output of the capture
@@ -96,7 +86,6 @@ static CamImage sized_img;
 static uint8_t *ei_camera_capture_out = NULL;
 
 
-//float features[FEATURE_SIZE];
 
 static ei_impulse_result_t ei_result = {0};
 int take_picture_count = 0;
@@ -134,19 +123,23 @@ bool RBG565ToRGB888(uint8_t *src_buf, uint8_t *dst_buf, uint32_t src_len)
     uint8_t hb, lb;
     uint32_t pix_count = src_len / 2;
     uint32_t count = 0;
+    uint32_t dest_count = 0;
 
       ei_printf("\timg size: %u\n", src_len);
 
     
-    for(uint32_t i = 0; i < pix_count; i ++) {
+    //for(uint32_t i = 0; i < pix_count; i ++) {
+    for(uint32_t i = 76770; i < pix_count; i ++) {
         hb = *src_buf++;
         lb = *src_buf++;
 
-        *dst_buf++ = hb & 0xF8;
+        /**dst_buf++ = hb & 0xF8;
         *dst_buf++ = (hb & 0x07) << 5 | (lb & 0xE0) >> 3;
-        *dst_buf++ = (lb & 0x1F) << 3;
+        *dst_buf++ = (lb & 0x1F) << 3;*/
+
+        ei_printf("Count: %u R: %u  G: %u B: %u\n",count, hb & 0xF8,(hb & 0x07) << 5 | (lb & 0xE0) >> 3, (lb & 0x1F) << 3 ); 
         count++;
-        ei_printf("Src: %u\n",count); 
+        //
     }
 
     return true;
@@ -267,12 +260,12 @@ void CamCB(CamImage img) {}
 void ei_wildlife_camera_start_continuous(bool debug) {
   CamErr err;
   ei_printf("Starting the camera:\n");
-  err = theCamera.begin(1, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,
+  err = theCamera.begin(0, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,
                         CAM_IMAGE_PIX_FMT_RGB565);
 
   // err = theCamera.begin(1, CAM_VIDEO_FPS_5, EI_CLASSIFIER_INPUT_WIDTH,
   // EI_CLASSIFIER_INPUT_HEIGHT,CAM_IMAGE_PIX_FMT_YUV422);
-  if (err && debug)
+  if (err)
     printError(err);
 
   theCamera.setAutoISOSensitivity(true);
@@ -280,11 +273,7 @@ void ei_wildlife_camera_start_continuous(bool debug) {
 
   ei_printf("Starting sending data:\n");
 
-  // start streaming the preview images to the classifier
-  // err = theCamera.startStreaming(true, CamCB);
 
-  if (err)
-    printError(err);
 
   ei_printf("Set format:\n");
   // still image format must be jpeg to allow for compressed storage/transmit
@@ -328,9 +317,11 @@ ei_printf("Start Capture\n");
     unsigned long StartTime = millis();
   CamImage img = theCamera.takePicture();
 
-  if (!img.isAvailable())
-    return; // fast path if image is no longer ready
-
+  if (!img.isAvailable()){
+    return false; // fast path if image is no longer ready
+  }
+  
+    ei_printf("imgsize: %u bufsize: %u Img Pix Fmt: %d\n", img.getImgSize(), img.getImgBuffSize(), img.getPixFormat());
     bool converted = RBG565ToRGB888(img.getImgBuff(), ei_camera_capture_out, img.getImgSize());
     
     if(!converted){
@@ -433,8 +424,12 @@ void setup() {
   ei_printf("Enabled EI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN : %d\n",
             EI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN);
 #endif
-ei_camera_capture_out = (uint8_t*)ei_malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * 3 + 32);
-
+/*ei_camera_capture_out = (uint8_t*)malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * 3 + 32);
+if (ei_camera_capture_out == NULL)
+{ 
+  ei_printf("MALLOC FAILED!!\n");
+  exit(0);
+}*/
 ei_printf("Capture Buffer Size: %d \n", EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * 3 + 32);
   /*LowPower.begin();
  // Set the highest clock mode
@@ -453,6 +448,7 @@ printClockMode();*/
 }
 
 void loop() {
+  ei_sleep(2000);
   ei_printf("Start Loop\n");
 
   ei::signal_t signal;
