@@ -196,8 +196,48 @@ String create_topic_directory(String topic) {
   return path;
 }
 
+void save_json(char * filename) {
+    char line[100];
+    bool first_obj = true;
+    if (theSD.begin()) {
+    File myFile = theSD.open(filename, FILE_WRITE);
+    myFile.println("{ \"results\": [");
+
+  for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
+    auto bb = ei_result.bounding_boxes[ix];
+    if (bb.value == 0) {
+      continue;
+    }
+    if (!first_obj) {
+    sprintf(line,",\n{\n\"label\": \"%s\",", bb.label);
+    } else {
+      sprintf(line,"{\n\"label\": \"%s\",", bb.label);
+    }
+    myFile.println(line);
+    sprintf(line,"\"confidence\": \"%s\",", bb.value);
+    myFile.println(line);
+    sprintf(line,"\"x\": \"%s\",", bb.x);
+    myFile.println(line);
+    sprintf(line,"\"y\": \"%s\",", bb.y);
+    myFile.println(line);
+    sprintf(line,"\"width\": \"%s\",", bb.width);
+    myFile.println(line);
+    sprintf(line,"\"height\": \"%s\"\n}", bb.height);
+    myFile.print(line);
+    first_obj = false;
+  }
+    myFile.println("\n]}");
+    myFile.close();
+
+    } else {
+    Serial.println("failed to save images, check that "
+                   "SD card is connected properly");
+  }
+}
+
 void save_results(float high_score) {
   RtcTime now = RTC.getTime();
+  char filename[400];
   String path;
 
   if (theSD.begin()) {
@@ -212,7 +252,9 @@ void save_results(float high_score) {
     File myFile = theSD.open(filename, FILE_WRITE);
     myFile.write(input_image, INPUT_WIDTH * INPUT_HEIGHT * 3);
     myFile.close();
-
+    sprintf(filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d.json", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
+         now.hour(), now.minute(), now.second());
+    save_json(filename);
     path = create_topic_directory("raw");
     sprintf(filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d-raw.888", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
          now.hour(), now.minute(), now.second());
@@ -359,7 +401,7 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
   ei::signal_t signal;
-  char filename[400];
+
 
 
     // Wait for GNSS data
