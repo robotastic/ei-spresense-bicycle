@@ -13,24 +13,19 @@
 #define INPUT_WIDTH EI_CLASSIFIER_INPUT_WIDTH
 #define INPUT_HEIGHT EI_CLASSIFIER_INPUT_HEIGHT
 #define MY_TIMEZONE_IN_SECONDS (-4 * 60 * 60) // EST
-#define LED0_ON                                                                \
-  digitalWrite(LED0, HIGH); /* Macros for Switch on/off Board LEDs */
-#define LED0_OFF digitalWrite(LED0, LOW);
-#define LED1_ON digitalWrite(LED1, HIGH);
-#define LED1_OFF digitalWrite(LED1, LOW);
-#define LED2_ON digitalWrite(LED2, HIGH);
-#define LED2_OFF digitalWrite(LED2, LOW);
-#define LED3_ON digitalWrite(LED3, HIGH);
-#define LED3_OFF digitalWrite(LED3, LOW);
+#define DETECTION_THRESHOLD 0.80
+#define DETECTION_RESET_THRESHOLD 0.50
+#define SAVE_THRESHOLD 0.20
+
 
 static SDClass theSD;
 SpGnss Gnss;
-bool got_time = false;
-
+static bool got_time = false;
 static uint8_t *raw_image = NULL;
 static uint8_t *input_image = NULL;
 static ei_impulse_result_t ei_result = {0};
 int take_picture_count = 0;
+int bicycle_count = 0;
 
 #define ALIGN_PTR(p, a)                                                        \
   ((p & (a - 1)) ? (((uintptr_t)p + a) & ~(uintptr_t)(a - 1)) : p)
@@ -152,9 +147,9 @@ static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
   size_t out_ptr_ix = 0;
 
   while (pixels_left != 0) {
-    out_ptr[out_ptr_ix] = (raw_image[pixel_ix] << 16) +
-                          (raw_image[pixel_ix + 1] << 8) +
-                          raw_image[pixel_ix + 2];
+    out_ptr[out_ptr_ix] = (input_image[pixel_ix] << 16) +
+                          (input_image[pixel_ix + 1] << 8) +
+                          input_image[pixel_ix + 2];
 
     // go to the next pixel
     out_ptr_ix++;
@@ -164,6 +159,141 @@ static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
 
   // and done!
   return 0;
+}
+
+bool create_dir(String path) {
+  if (!SD.exists(path)) {
+    if (!SD.mkdir(path)) {
+      ei_printf("Failed to create dir: %s\n", path);
+      return false;
+    } else {
+      return true;
+    }
+  }
+  return true;
+}
+
+String create_topic_directory(String topic) {
+  RtcTime now = RTC.getTime();
+  char month_s[3];
+  char day_s[3];
+  bool success;
+  String path;
+  sprintf(month_s, " %02d", now.month());
+  sprintf(day_s, " %02d", now.day());
+  path = "/" + month_s;
+  if (!create_dir(path)) {
+    return NULL;
+  }
+  path = "/" + month_s + "/" + day_s;
+  if (!create_dir(path)) {
+    return NULL;
+  }
+  path = "/" + month_s + "/" + day_s + "/" + topic;
+  if (!create_dir(path)) {
+    return NULL;
+  }
+  return path;
+}
+
+void save_results(float high_score) {
+  RtcTime now = RTC.getTime();
+  String path;
+
+  if (theSD.begin()) {
+    int short_score = floor(high_score * 100);
+    path = create_topic_directory("detections");
+    sprintf(filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d.888", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
+         now.hour(), now.minute(), now.second());
+
+    ei_printf("INFO: saving %s to SD card... size: %d\n", filename,
+              INPUT_HEIGHT * INPUT_WIDTH * 3);
+    theSD.remove(filename);
+    File myFile = theSD.open(filename, FILE_WRITE);
+    myFile.write(input_image, INPUT_WIDTH * INPUT_HEIGHT * 3);
+    myFile.close();
+
+    path = create_topic_directory("raw");
+    sprintf(filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d-raw.888", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
+         now.hour(), now.minute(), now.second());
+
+    ei_printf("INFO: saving %s to SD card... size: %d\n", filename,
+              RAW_HEIGHT * RAW_WIDTH * 3);
+    theSD.remove(filename);
+    myFile = theSD.open(filename, FILE_WRITE);
+    myFile.write(raw_image, RAW_WIDTH * RAW_HEIGHT * 3);
+    myFile.close();
+  } else {
+    Serial.println("failed to save images, check that "
+                   "SD card is connected properly");
+  }
+
+}
+
+
+void analyze_results() {
+
+
+  /* if the confidence goes above the DETECTION_THRESHOLD, set tracking_object to TRUE and add to the bicycle count
+      the tracking_object is used to help make sure a bicycle doesn't get counted twice. It gets reset to false
+      when the confidence is below DETECTION_RESET_THRESHOLD */
+  bool save_image = false;
+  bool spotted_object = false;
+  static bool tracking_object = false;
+  bool reset_tracking = true;
+  float high_score = 0.0;
+    ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d "
+            "ms.): \n",
+            ei_result.timing.dsp, ei_result.timing.classification,
+            ei_result.timing.anomaly);
+
+  bool bb_found = ei_result.bounding_boxes[0].value > 0;
+
+  for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
+    auto bb = ei_result.bounding_boxes[ix];
+    if (bb.value == 0) {
+      continue;
+    }
+    if (bb.value > high_score) {
+      high_score = bb.value;
+    }
+    if (bb.value >= SAVE_THRESHOLD) {
+      save_image = true;
+    }
+
+    if (bb.value >= DETECTION_RESET_THRESHOLD) {
+      reset_tracking = false;
+    }
+    if (bb.value >= DETECTION_THRESHOLD) {
+      spotted_object = true;
+    }
+
+    ei_printf("    %s (", bb.label);
+    ei_printf_float(bb.value);
+    ei_printf(") [ x: %u, y: %u, width: %u, height: %u ]\n", bb.x, bb.y,
+              bb.width, bb.height);
+  }
+
+  if (!bb_found) {
+    ei_printf("    No objects found\n");
+  } 
+
+  if (save_image) {
+    save_results(high_score);
+  }
+
+  if (spotted_object) {
+    if (!tracking_object) {
+      tracking_object = true;
+      bicycle_count++;
+      ei_printf("Detected new bicycle, count is: %d\n", bicycle_count);
+      // add something here to write to a file
+    }
+  }
+
+  if (reset_tracking) {
+    tracking_object = false;
+  }
 }
 
 void setup() {
@@ -229,7 +359,6 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
   ei::signal_t signal;
-  bool spotted_object = false;
   char filename[400];
 
 
@@ -246,7 +375,7 @@ void loop() {
 
   signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
   signal.get_data = &ei_camera_get_data;
-  float score = 0;
+
   bool converted =
       RBG565ToRGB888(img.getImgBuff(), raw_image, img.getImgSize());
   if (!converted) {
@@ -266,65 +395,7 @@ void loop() {
     return;
   }
   // print the predictions
+  analyze_results();
 
-  ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d "
-            "ms.): \n",
-            ei_result.timing.dsp, ei_result.timing.classification,
-            ei_result.timing.anomaly);
-
-  bool bb_found = ei_result.bounding_boxes[0].value > 0;
-
-  LED1_OFF
-  LED2_OFF
-  LED3_OFF
-
-  spotted_object = true;
-
-  for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
-    auto bb = ei_result.bounding_boxes[ix];
-    if (bb.value > score) {
-      score = bb.value;
-    }
-
-    if (bb.value == 0) {
-      continue;
-    }
-    if (bb.value > 0.2) {
-      spotted_object = true;
-    }
-    if (bb.value > 0.7) {
-      LED1_ON
-    }
-    if (bb.value > 0.8) {
-      LED2_ON
-    }
-    if (bb.value > 0.9) {
-      LED3_ON
-    }
-    ei_printf("    %s (", bb.label);
-    ei_printf_float(bb.value);
-    ei_printf(") [ x: %u, y: %u, width: %u, height: %u ]\n", bb.x, bb.y,
-              bb.width, bb.height);
-  }
-
-  if (!bb_found) {
-    ei_printf("    No objects found\n");
-  }
-
-  if (theSD.begin()) {
-    int short_score = floor(score * 100);
-
-    sprintf(filename, "%d-%d.888", take_picture_count, short_score);
-
-    ei_printf("INFO: saving %s to SD card... size: %d\n", filename,
-              96 * 96 * 3);
-    theSD.remove(filename);
-    File myFile = theSD.open(filename, FILE_WRITE);
-    myFile.write(raw_image, 96 * 96 * 3);
-    myFile.close();
-  } else {
-    Serial.println("failed to compress and save image, check that camera and "
-                   "SD card are connected properly");
-  }
   take_picture_count++;
 }
