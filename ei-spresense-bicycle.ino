@@ -18,7 +18,7 @@
 #define SAVE_THRESHOLD 0.20
 
 
-static SDClass theSD;
+static SDClass SD;
 SpGnss Gnss;
 static bool got_time = false;
 static uint8_t *raw_image = NULL;
@@ -71,18 +71,6 @@ void printError(enum CamErr err) {
   }
 }
 
-
-void updateClock()
-{
-  static RtcTime old;
-  RtcTime now = RTC.getTime();
-
-  // Display only when the second is updated
-  if (now != old) {
-    printClock(now);
-    old = now;
-  }
-}
 
 void checkClock() {
 
@@ -178,20 +166,21 @@ String create_topic_directory(String topic) {
   char month_s[3];
   char day_s[3];
   bool success;
-  String path;
+  String path = "/";
+
   sprintf(month_s, " %02d", now.month());
   sprintf(day_s, " %02d", now.day());
-  path = "/" + month_s;
+  path = String("/") + month_s;
   if (!create_dir(path)) {
-    return NULL;
+    return String("/");
   }
-  path = "/" + month_s + "/" + day_s;
+  path = String("/") + month_s + "/" + day_s;
   if (!create_dir(path)) {
-    return NULL;
+    return String("/");
   }
-  path = "/" + month_s + "/" + day_s + "/" + topic;
+  path = String("/") + month_s + "/" + day_s + "/" + topic;
   if (!create_dir(path)) {
-    return NULL;
+    return String("/");
   }
   return path;
 }
@@ -199,8 +188,8 @@ String create_topic_directory(String topic) {
 void save_json(char * filename) {
     char line[100];
     bool first_obj = true;
-    if (theSD.begin()) {
-    File myFile = theSD.open(filename, FILE_WRITE);
+    if (SD.begin()) {
+    File myFile = SD.open(filename, FILE_WRITE);
     myFile.println("{ \"results\": [");
 
   for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
@@ -240,7 +229,7 @@ void save_results(float high_score) {
   char filename[400];
   String path;
 
-  if (theSD.begin()) {
+  if (SD.begin()) {
     int short_score = floor(high_score * 100);
     path = create_topic_directory("detections");
     sprintf(filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d.888", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
@@ -248,8 +237,8 @@ void save_results(float high_score) {
 
     ei_printf("INFO: saving %s to SD card... size: %d\n", filename,
               INPUT_HEIGHT * INPUT_WIDTH * 3);
-    theSD.remove(filename);
-    File myFile = theSD.open(filename, FILE_WRITE);
+    SD.remove(filename);
+    File myFile = SD.open(filename, FILE_WRITE);
     myFile.write(input_image, INPUT_WIDTH * INPUT_HEIGHT * 3);
     myFile.close();
     sprintf(filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d.json", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
@@ -261,8 +250,8 @@ void save_results(float high_score) {
 
     ei_printf("INFO: saving %s to SD card... size: %d\n", filename,
               RAW_HEIGHT * RAW_WIDTH * 3);
-    theSD.remove(filename);
-    myFile = theSD.open(filename, FILE_WRITE);
+    SD.remove(filename);
+    myFile = SD.open(filename, FILE_WRITE);
     myFile.write(raw_image, RAW_WIDTH * RAW_HEIGHT * 3);
     myFile.close();
   } else {
@@ -346,7 +335,7 @@ void setup() {
 
   /* Initialize SD */
 
-  while (!theSD.begin()) {
+  while (!SD.begin()) {
     Serial.println("Insert SD card.");
   }
 
