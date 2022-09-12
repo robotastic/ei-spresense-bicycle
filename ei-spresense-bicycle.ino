@@ -7,8 +7,8 @@
 #include <RTC.h>
 //#include <GNSS.h>
 
-//#include <ArduinoMqttClient.h>
-//#include <LTE.h>
+#include <ArduinoMqttClient.h>
+#include <LTE.h>
 
 #define RAW_WIDTH CAM_IMGSIZE_QVGA_H
 #define RAW_HEIGHT CAM_IMGSIZE_QVGA_V
@@ -62,17 +62,18 @@ int bicycle_count = 0;
 // MQTT publish interval settings
 #define PUBLISH_INTERVAL_SEC   5   // MQTT publish interval in sec
 #define MAX_NUMBER_OF_PUBLISH  60  // Maximum number of publish
-/*
+
 LTE lteAccess;
 LTEClient client;
-MqttClient mqttClient(client);*/
+MqttClient mqttClient(client);
 SDClass theSD;
 int numOfPubs = 0;
 unsigned long lastPubSec = 0;
 char broker[] = BROKER_NAME;
 int port = BROKER_PORT;
 char topic[]  = MQTT_TOPIC;
-
+char mqtt_username[] = "robotastic";
+char mqtt_password[] = "";
 
 #define ALIGN_PTR(p, a)                                                        \
   ((p & (a - 1)) ? (((uintptr_t)p + a) & ~(uintptr_t)(a - 1)) : p)
@@ -175,29 +176,9 @@ bool RBG565ToRGB888(uint8_t *src_buf, uint8_t *dst_buf, uint32_t src_len) {
   return true;
 }
 
-static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
-  // we already have a RGB888 buffer, so recalculate offset into pixel index
-  size_t pixel_ix = offset * 3;
-  size_t pixels_left = length;
-  size_t out_ptr_ix = 0;
-
-  while (pixels_left != 0) {
-    out_ptr[out_ptr_ix] = (raw_image[pixel_ix] << 16) +
-                          (raw_image[pixel_ix + 1] << 8) +
-                          raw_image[pixel_ix + 2];
-
-    // go to the next pixel
-    out_ptr_ix++;
-    pixel_ix += 3;
-    pixels_left--;
-  }
-
-  // and done!
-  return 0;
-}
 
 
-/*
+
 static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
   // we already have a RGB888 buffer, so recalculate offset into pixel index
   size_t pixel_ix = offset * 3;
@@ -219,7 +200,7 @@ static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
   return 0;
 }
 
-*/
+
 bool create_dir(String path) {
   if (!SD.exists(path)) {
     if (!SD.mkdir(path)) {
@@ -239,8 +220,8 @@ String create_topic_directory(String topic) {
   bool success;
   String path = "/";
 
-  sprintf(month_s, " %02d", now.month());
-  sprintf(day_s, " %02d", now.day());
+  sprintf(month_s, "%02d", now.month());
+  sprintf(day_s, "%02d", now.day());
   path = String("/") + month_s;
   if (!create_dir(path)) {
     return String("/");
@@ -274,15 +255,15 @@ void save_json(char * filename) {
       sprintf(line,"{\n\"label\": \"%s\",", bb.label);
     }
     myFile.println(line);
-    sprintf(line,"\"confidence\": \"%s\",", bb.value);
+    sprintf(line,"\"confidence\": \"%f\",", bb.value);
     myFile.println(line);
-    sprintf(line,"\"x\": \"%s\",", bb.x);
+    sprintf(line,"\"x\": \"%d\",", bb.x);
     myFile.println(line);
-    sprintf(line,"\"y\": \"%s\",", bb.y);
+    sprintf(line,"\"y\": \"%d\",", bb.y);
     myFile.println(line);
-    sprintf(line,"\"width\": \"%s\",", bb.width);
+    sprintf(line,"\"width\": \"%d\",", bb.width);
     myFile.println(line);
-    sprintf(line,"\"height\": \"%s\"\n}", bb.height);
+    sprintf(line,"\"height\": \"%d\"\n}", bb.height);
     myFile.print(line);
     first_obj = false;
   }
@@ -349,88 +330,7 @@ void save_results(float high_score) {
 
 }
 
-/*
-void send_updated_count() {
-      // Publish to broker
-    Serial.print("Sending message to topic: ");
-    Serial.println(topic);
-    Serial.print("Publish: ");
-    String jsonString = "{\"value\":" + String(bicycle_count)  + "}";
-    Serial.println(jsonString);
 
-    // send message, the Print interface can be used to set the message contents
-    mqttClient.beginMessage(topic);
-    mqttClient.print(jsonString);
-    //mqttClient.print(out);
-    mqttClient.endMessage();
-}
-*/
-void analyze_results() {
-
-
-  /* if the confidence goes above the DETECTION_THRESHOLD, set tracking_object to TRUE and add to the bicycle count
-      the tracking_object is used to help make sure a bicycle doesn't get counted twice. It gets reset to false
-      when the confidence is below DETECTION_RESET_THRESHOLD */
-  bool save_image = false;
-  bool spotted_object = false;
-  static bool tracking_object = false;
-  bool reset_tracking = true;
-  float high_score = 0.0;
-    ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d "
-            "ms.): \n",
-            ei_result.timing.dsp, ei_result.timing.classification,
-            ei_result.timing.anomaly);
-
-  bool bb_found = ei_result.bounding_boxes[0].value > 0;
-
-  for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
-    auto bb = ei_result.bounding_boxes[ix];
-    if (bb.value == 0) {
-      continue;
-    }
-    if (bb.value > high_score) {
-      high_score = bb.value;
-    }
-    if (bb.value >= SAVE_THRESHOLD) {
-      save_image = true;
-    }
-
-    if (bb.value >= DETECTION_RESET_THRESHOLD) {
-      reset_tracking = false;
-    }
-    if (bb.value >= DETECTION_THRESHOLD) {
-      spotted_object = true;
-    }
-
-    ei_printf("    %s (", bb.label);
-    ei_printf_float(bb.value);
-    ei_printf(") [ x: %u, y: %u, width: %u, height: %u ]\n", bb.x, bb.y,
-              bb.width, bb.height);
-  }
-
-  if (!bb_found) {
-    ei_printf("    No objects found\n");
-  } 
-
-  if (save_image) {
-    save_results(high_score);
-  }
-
-  if (spotted_object) {
-    if (!tracking_object) {
-      tracking_object = true;
-      bicycle_count++;
-      //send_updated_count();
-      ei_printf("Detected new bicycle, count is: %d\n", bicycle_count);
-      // add something here to write to a file
-    }
-  }
-
-  if (reset_tracking) {
-    tracking_object = false;
-  }
-}
-/*
 void connect_lte_mqtt() {
   char apn[LTE_NET_APN_MAXLEN] = APP_LTE_APN;
   LTENetworkAuthType authtype = APP_LTE_AUTH_TYPE;
@@ -492,6 +392,8 @@ void connect_lte_mqtt() {
   }
 
     // Set local time (not UTC) obtained from the network to RTC.
+  
+  
   RTC.begin();
   unsigned long currentTime;
   while(0 == (currentTime = lteAccess.getTime())) {
@@ -501,8 +403,6 @@ void connect_lte_mqtt() {
   RTC.setTime(rtc);
 
   
-    char mqtt_username[] = "robotastic"; //bike-detect.azure-devices.net/woodley_place/?api-version=2021-04-12";
-  char mqtt_password[] = ""; //"SharedAccessSignature sr=bike-detect.azure-devices.net%2Fdevices%2Fwoodley_place&sig=VESTPm64tMMelVK7NmevjHKWR%2B6274DqFlOCpac05VI%3D&se=2022598854";
   mqttClient.setUsernamePassword(mqtt_username, mqtt_password);
   mqttClient.setId("woodley_place");
   Serial.print("Attempting to connect to the MQTT broker: ");
@@ -513,30 +413,141 @@ void connect_lte_mqtt() {
     sleep(3);
   }
   Serial.println("You're connected to the MQTT broker!");
+  return;
+}
+void send_updated_count() {
+    LTEModemStatus lte_status = lteAccess.getStatus();
+    if (lte_status != LTE_READY) {
+      Serial.println("LTE Modem is not connected.\n Current status is:");
+      Serial.println(lte_status);
+      lteAccess.shutdown();
+      sleep(1);
+      connect_lte_mqtt();
+    }
+
+  Serial.print("Current client State: ");
+  Serial.println(mqttClient.connected());
+  Serial.print("Attempting to connect to the MQTT broker: ");
+  Serial.println(broker);
+  while(!mqttClient.connect(broker, port)) {
+    Serial.print("MQTT connection failed! Error code = ");
+    Serial.println(mqttClient.connectError());
+    sleep(3);
+  }
+  Serial.println("You're connected to the MQTT broker!");
+  
+      // Publish to broker
+    Serial.print("Sending message to topic: ");
+    Serial.println(topic);
+    Serial.print("Publish: ");
+    String jsonString = "{\"value\":" + String(bicycle_count)  + "}";
+    Serial.println(jsonString);
+
+    // send message, the Print interface can be used to set the message contents
+    mqttClient.beginMessage(topic);
+    mqttClient.print(jsonString);
+    //mqttClient.print(out);
+    mqttClient.endMessage();
+    delay(3000);
 }
 
-*/
-void setup() {
-  CamErr err;
+void analyze_results() {
 
-  Serial.begin(115200);
-  Serial.println("INFO: wildlife_camera initializing on wakeup...");
 
-  /* Initialize SD */
+  /* if the confidence goes above the DETECTION_THRESHOLD, set tracking_object to TRUE and add to the bicycle count
+      the tracking_object is used to help make sure a bicycle doesn't get counted twice. It gets reset to false
+      when the confidence is below DETECTION_RESET_THRESHOLD */
+  bool save_image = false;
+  bool spotted_object = false;
+  static bool tracking_object = false;
+  bool reset_tracking = true;
+  float high_score = 0.0;
+    ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d "
+            "ms.): \n",
+            ei_result.timing.dsp, ei_result.timing.classification,
+            ei_result.timing.anomaly);
 
-  while (!SD.begin()) {
-    Serial.println("Insert SD card.");
+  bool bb_found = ei_result.bounding_boxes[0].value > 0;
+
+  for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
+    auto bb = ei_result.bounding_boxes[ix];
+    if (bb.value == 0) {
+      continue;
+    }
+    if (bb.value > high_score) {
+      high_score = bb.value;
+    }
+    if (bb.value >= SAVE_THRESHOLD) {
+      save_image = true;
+    }
+
+    if (bb.value >= DETECTION_RESET_THRESHOLD) {
+      reset_tracking = false;
+    }
+    if (bb.value >= DETECTION_THRESHOLD) {
+      spotted_object = true;
+    }
+
+    ei_printf("    %s (", bb.label);
+    ei_printf_float(bb.value);
+    ei_printf(") [ x: %u, y: %u, width: %u, height: %u ]\n", bb.x, bb.y,
+              bb.width, bb.height);
   }
 
-  err = theCamera.begin(0, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,
+  if (!bb_found) {
+    ei_printf("    No objects found\n");
+  } 
+
+  if (save_image) {
+    save_results(high_score);
+  }
+
+  if (spotted_object) {
+    if (!tracking_object) {
+      tracking_object = true;
+      bicycle_count++;
+      send_updated_count();
+      ei_printf("Detected new bicycle, count is: %d\n", bicycle_count);
+      // add something here to write to a file
+    }
+  }
+
+  if (reset_tracking) {
+    tracking_object = false;
+  }
+}
+
+
+void setup_camera() {
+    CamErr err;
+    err = theCamera.begin(0, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,
                         CAM_IMAGE_PIX_FMT_RGB565);
   theCamera.setAutoISOSensitivity(true);
   theCamera.setAutoWhiteBalance(true);
 
   err = theCamera.setStillPictureImageFormat(RAW_WIDTH, RAW_HEIGHT,
                                              CAM_IMAGE_PIX_FMT_RGB565);
-  if (err)
+
+    if (err)
     printError(err);
+    return;
+}
+
+void setup() {
+
+
+  Serial.begin(115200);
+  Serial.println("INFO: wildlife_camera initializing on wakeup...");
+  connect_lte_mqtt();
+  /* Initialize SD */
+  sleep(1);
+
+  while (!SD.begin()) {
+    Serial.println("Insert SD card.");
+  }
+
+
+  
 
   // summary of inferencing settings (from model_metadata.h)
   ei_printf("Inferencing settings:\n");
@@ -557,7 +568,7 @@ void setup() {
 
 
 
-  input_image = (uint8_t *)malloc(INPUT_WIDTH * INPUT_HEIGHT * 3 + 32);
+  input_image = (uint8_t *)malloc(RAW_WIDTH * RAW_HEIGHT * 3 + 32);
   input_image = (uint8_t *)ALIGN_PTR((uintptr_t)input_image, 32);
   if (input_image == NULL) {
     ei_printf("input_image MALLOC FAILED!!\n");
@@ -575,9 +586,12 @@ void setup() {
   ret = Gnss.start();
   assert(ret == 0);*/
 
-  //connect_lte_mqtt();
-  ei_printf("Complete setup\n");
+  // I kept getting erros unless the Camera Setup was done last
+  setup_camera();
+  sleep(1);
 
+  ei_printf("Complete setup\n");
+  return;
 }
 
 void loop() {
@@ -596,6 +610,10 @@ void loop() {
   CamImage img = theCamera.takePicture();
   if (!img.isAvailable()) {
     ei_printf("ERR: Take Picture Failed!\n");
+    sleep(1);
+    theCamera.end();
+    sleep(1);
+    setup_camera();
     return false; // fast path if image is no longer ready
   }
 
@@ -603,20 +621,17 @@ void loop() {
   signal.get_data = &ei_camera_get_data;
   ei_printf("Trying to convert\n");
   bool converted =
-      RBG565ToRGB888(img.getImgBuff(), raw_image, img.getImgSize());
+      RBG565ToRGB888(img.getImgBuff(), input_image, img.getImgSize());
   if (!converted) {
     ei_printf("ERR: Conversion failed\n");
     return false;
   } else {
     ei_printf("Successfully converted to RGB888\n");
   }
+  memcpy(raw_image, input_image, RAW_WIDTH * RAW_HEIGHT * 3 + 32);
 
- /* ei::image::processing::crop_and_interpolate_rgb888(
-      raw_image, RAW_WIDTH, RAW_HEIGHT, input_image,
-      EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT);
-*/
     ei::image::processing::crop_and_interpolate_rgb888(
-      raw_image, RAW_WIDTH, RAW_HEIGHT, raw_image,
+      input_image, RAW_WIDTH, RAW_HEIGHT, input_image,
       EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT);
   ei_printf("Cropped and converted\n");
   EI_IMPULSE_ERROR err = run_classifier(&signal, &ei_result, false);
