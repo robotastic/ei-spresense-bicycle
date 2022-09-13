@@ -1,4 +1,5 @@
 archive
 *.888
 *.png
-*.png
+.DS_Store
+
