@@ -45,7 +45,6 @@
 
 
 
-
 static SDClass SD;
 //SpGnss Gnss;
 static bool got_time = false;
