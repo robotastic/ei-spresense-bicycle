@@ -87,76 +87,31 @@ static CamImage sized_img;
 
 static ei_impulse_result_t ei_result = {0};
 int take_picture_count = 0;
-bool spotted_object = false;
-float score = 0;
-/* prototypes */
-void printError(enum CamErr err);
-void CamCB(CamImage img);
+int bicycle_count = 0;
 
+// MQTT broker
+#define BROKER_NAME        "io.adafruit.com"
+#define BROKER_PORT        1883               // port 8883 is the default for MQTT over TLS.
+#define MQTT_TOPIC         "robotastic/feeds/bike"
+// MQTT publish interval settings
+#define PUBLISH_INTERVAL_SEC   5   // MQTT publish interval in sec
+#define MAX_NUMBER_OF_PUBLISH  60  // Maximum number of publish
 
-/**
-   @brief      Convert monochrome data to rgb values
+LTE lteAccess;
+LTEClient client;
+MqttClient mqttClient(client);
+SDClass theSD;
+int numOfPubs = 0;
+unsigned long lastPubSec = 0;
+char broker[] = BROKER_NAME;
+int port = BROKER_PORT;
+char topic[]  = MQTT_TOPIC;
+char mqtt_username[] = "robotastic";
+char mqtt_password[] = "";
 
-   @param[in]  mono_data  The mono data
-   @param      r          red pixel value
-   @param      g          green pixel value
-   @param      b          blue pixel value
-*/
-static inline void mono_to_rgb(uint8_t mono_data, uint8_t *r, uint8_t *g,
-                               uint8_t *b) {
-  uint8_t v = mono_data;
-  *r = *g = *b = v;
-}
-/*
-int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
-  memcpy(out_ptr, features + offset, length * sizeof(float));
-  return 0;
-}*/
+#define ALIGN_PTR(p, a)                                                        \
+  ((p & (a - 1)) ? (((uintptr_t)p + a) & ~(uintptr_t)(a - 1)) : p)
 
-void r565_to_rgb(uint16_t color, uint8_t *r, uint8_t *g, uint8_t *b) {
-  *r = (color & 0xF800) >> 8;
-  *g = (color & 0x07E0) >> 3;
-  *b = (color & 0x1F) << 3;
-}
-
-
-/**
- * @brief      Convert RGB565 raw camera buffer to RGB888
- *
- * @param[in]   offset       pixel offset of raw buffer
- * @param[in]   length       number of pixels to convert
- * @param[out]  out_buf      pointer to store output image
- */
-
-// this is from the Nano BLE example
-int ei_camera_cutout_get_data(size_t offset, size_t length, float *out_ptr) {
-    size_t byte_ix = offset * 2; 
-    size_t pixels_left = length;
-    size_t out_ptr_ix = 0;
-     // grab the value and convert to r/g/b
-    uint8_t *buffer = sized_img.getImgBuff();
-    // read byte for byte
-    while (pixels_left != 0) {
-
-        uint16_t pixel = (buffer[byte_ix] << 8) | buffer[byte_ix+1];
-        uint8_t r, g, b;
-        r = ((pixel >> 11) & 0x1f) << 3;
-        g = ((pixel >> 5) & 0x3f) << 2;
-        b = (pixel & 0x1f) << 3;
-
-        // then convert to out_ptr format
-        float pixel_f = (r << 16) + (g << 8) + b;
-        out_ptr[out_ptr_ix] = pixel_f;
-
-        // and go to the next pixel
-        out_ptr_ix++;
-        byte_ix+=2;
-        pixels_left--;
-    }
-
-    // and done!
-    return 0;
-}
 
 /**
    Print error message
