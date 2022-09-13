@@ -1,162 +1,81 @@
 #include <bicycle-street-fomo_inferencing.h>
-
-/* Edge Impulse Arduino examples
- * Copyright (c) 2021 EdgeImpulse Inc.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy
- * of this software and associated documentation files (the "Software"), to deal
- * in the Software without restriction, including without limitation the rights
- * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
- * copies of the Software, and to permit persons to whom the Software is
- * furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
- * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
-
-/* Includes ---------------------------------------------------------------- */
-
+#include "edge-impulse-sdk/dsp/image/image.hpp"
 #include <Camera.h>
-#include <LowPower.h>
 #include <SDHCI.h>
-#include <stdint.h>
-#include <stdlib.h>
 
-#define DEBUG true
-#define TAKE_PHOTOS true
 
-static SDClass theSD;
-#define DWORD_ALIGN_PTR(a)                                                     \
-  ((a & 0x3) ? (((uintptr_t)a + 0x4) & ~(uintptr_t)0x3) : a)
+#include <RTC.h>
+//#include <GNSS.h>
 
-/* Defines to center crop and resize a image to the Impulse image size the
-   speresense hardware accelerator
+#include <ArduinoMqttClient.h>
+#include <LTE.h>
 
-   NOTE: EI_CLASSIFIER_INPUT width and height must be less than RAW_HEIGHT *
-   SCALE_FACTOR, and must simultaneously meet the requirements of the spresense
-   api:
-   https://developer.sony.com/develop/spresense/developer-tools/api-reference/api-references-arduino/group__camera.html#ga3df31ea63c3abe387ddd1e1fd2724e97
-*/
-
-#define LED0_ON                                                                \
-  digitalWrite(LED0, HIGH); /* Macros for Switch on/off Board LEDs */
-#define LED0_OFF digitalWrite(LED0, LOW);
-#define LED1_ON digitalWrite(LED1, HIGH);
-#define LED1_OFF digitalWrite(LED1, LOW);
-#define LED2_ON digitalWrite(LED2, HIGH);
-#define LED2_OFF digitalWrite(LED2, LOW);
-#define LED3_ON digitalWrite(LED3, HIGH);
-#define LED3_OFF digitalWrite(LED3, LOW);
-
-#define PICTURE_SIGNALLING_ON LED0_ON   /* Switch on LED when take a photo */
-#define PICTURE_SIGNALLING_OFF LED0_OFF /* Switch off LED when taken photo */
-
-//#define RAW_WIDTH EI_CLASSIFIER_INPUT_WIDTH   // CAM_IMGSIZE_QVGA_H
-//#define RAW_HEIGHT EI_CLASSIFIER_INPUT_HEIGHT // CAM_IMGSIZE_QVGA_V
-
-#define SCALE_FACTOR 1
 #define RAW_WIDTH CAM_IMGSIZE_QVGA_H
 #define RAW_HEIGHT CAM_IMGSIZE_QVGA_V
-#define CLIP_WIDTH (EI_CLASSIFIER_INPUT_WIDTH * SCALE_FACTOR)
-#define CLIP_HEIGHT (EI_CLASSIFIER_INPUT_HEIGHT * SCALE_FACTOR)
-#define OFFSET_X  ((RAW_WIDTH - CLIP_WIDTH) / 2)
-#define OFFSET_Y  ((RAW_HEIGHT - CLIP_HEIGHT) / 2)
+#define INPUT_WIDTH EI_CLASSIFIER_INPUT_WIDTH
+#define INPUT_HEIGHT EI_CLASSIFIER_INPUT_HEIGHT
+#define MY_TIMEZONE_IN_SECONDS (-4 * 60 * 60) // EST
+#define DETECTION_THRESHOLD 0.80
+#define DETECTION_RESET_THRESHOLD 0.50
+#define SAVE_THRESHOLD 0.20
 
 
-// enable for very verbose logging from edge impulse sdk
-#define DEBUG_NN false
-#define GRAYSCALE false
+// APN name
+#define APP_LTE_APN "iot.truphone.com" // replace your APN
 
-#define CLASSIFIER_THRESHOLD 0.7
-#define CLASSIFIER_ANIMAL_INDEX 0
-#define FEATURE_SIZE 9216
+/* APN authentication settings
+ * Ignore these parameters when setting LTE_NET_AUTHTYPE_NONE.
+ */
+#define APP_LTE_USER_NAME "" // replace with your username
+#define APP_LTE_PASSWORD  "" // replace with your password
 
+// APN IP type
+#define APP_LTE_IP_TYPE (LTE_NET_IPTYPE_V4V6) // IP : IPv4v6
 
+// APN authentication type
+ #define APP_LTE_AUTH_TYPE (LTE_NET_AUTHTYPE_NONE) // Authentication : NONE
 
-/* static variables */
-static CamImage sized_img;
-//float features[FEATURE_SIZE];
-
-static ei_impulse_result_t ei_result = {0};
-int take_picture_count = 0;
-bool spotted_object = false;
-float score = 0;
-/* prototypes */
-void printError(enum CamErr err);
-void CamCB(CamImage img);
-
-
-/**
-   @brief      Convert monochrome data to rgb values
-
-   @param[in]  mono_data  The mono data
-   @param      r          red pixel value
-   @param      g          green pixel value
-   @param      b          blue pixel value
-*/
-static inline void mono_to_rgb(uint8_t mono_data, uint8_t *r, uint8_t *g,
-                               uint8_t *b) {
-  uint8_t v = mono_data;
-  *r = *g = *b = v;
-}
-/*
-int raw_feature_get_data(size_t offset, size_t length, float *out_ptr) {
-  memcpy(out_ptr, features + offset, length * sizeof(float));
-  return 0;
-}*/
-
-void r565_to_rgb(uint16_t color, uint8_t *r, uint8_t *g, uint8_t *b) {
-  *r = (color & 0xF800) >> 8;
-  *g = (color & 0x07E0) >> 3;
-  *b = (color & 0x1F) << 3;
-}
-
-
-/**
- * @brief      Convert RGB565 raw camera buffer to RGB888
- *
- * @param[in]   offset       pixel offset of raw buffer
- * @param[in]   length       number of pixels to convert
- * @param[out]  out_buf      pointer to store output image
+/* RAT to use
+ * Refer to the cellular carriers information
+ * to find out which RAT your SIM supports.
+ * The RAT set on the modem can be checked with LTEModemVerification::getRAT().
  */
 
-// this is from the Nano BLE example
-int ei_camera_cutout_get_data(size_t offset, size_t length, float *out_ptr) {
-    size_t byte_ix = offset * 2; 
-    size_t pixels_left = length;
-    size_t out_ptr_ix = 0;
-     // grab the value and convert to r/g/b
-    uint8_t *buffer = sized_img.getImgBuff();
-    // read byte for byte
-    while (pixels_left != 0) {
+#define APP_LTE_RAT (LTE_NET_RAT_CATM) // RAT : LTE-M (LTE Cat-M1)
 
-        uint16_t pixel = (buffer[byte_ix] << 8) | buffer[byte_ix+1];
-        uint8_t r, g, b;
-        r = ((pixel >> 11) & 0x1f) << 3;
-        g = ((pixel >> 5) & 0x3f) << 2;
-        b = (pixel & 0x1f) << 3;
 
-        // then convert to out_ptr format
-        float pixel_f = (r << 16) + (g << 8) + b;
-        out_ptr[out_ptr_ix] = pixel_f;
 
-        // and go to the next pixel
-        out_ptr_ix++;
-        byte_ix+=2;
-        pixels_left--;
-    }
+static SDClass SD;
+//SpGnss Gnss;
+static bool got_time = false;
+static uint8_t *raw_image = NULL;
+static uint8_t *input_image = NULL;
+static ei_impulse_result_t ei_result = {0};
+int take_picture_count = 0;
+int bicycle_count = 0;
 
-    // and done!
-    return 0;
-}
+// MQTT broker
+#define BROKER_NAME        "io.adafruit.com"
+#define BROKER_PORT        1883               // port 8883 is the default for MQTT over TLS.
+#define MQTT_TOPIC         "robotastic/feeds/bike"
+// MQTT publish interval settings
+#define PUBLISH_INTERVAL_SEC   5   // MQTT publish interval in sec
+#define MAX_NUMBER_OF_PUBLISH  60  // Maximum number of publish
+
+LTE lteAccess;
+LTEClient client;
+MqttClient mqttClient(client);
+SDClass theSD;
+int numOfPubs = 0;
+unsigned long lastPubSec = 0;
+char broker[] = BROKER_NAME;
+int port = BROKER_PORT;
+char topic[]  = MQTT_TOPIC;
+char mqtt_username[] = "robotastic";
+char mqtt_password[] = "";
+
+#define ALIGN_PTR(p, a)                                                        \
+  ((p & (a - 1)) ? (((uintptr_t)p + a) & ~(uintptr_t)(a - 1)) : p)
 
 /**
    Print error message
@@ -199,225 +118,435 @@ void printError(enum CamErr err) {
   }
 }
 
-/**
-   @brief run inference on the static sized_image buffer using the provided
-   impulse
-*/
-static void ei_wildlife_camera_classify(bool debug) {
-  ei::signal_t signal;
-  spotted_object = false;
-  signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
-  signal.get_data = &ei_camera_cutout_get_data; //&raw_feature_get_data; //&ei_camera_cutout_get_data;
+/*
+void checkClock() {
 
-  score = 0;
-  EI_IMPULSE_ERROR err = run_classifier(&signal, &ei_result, DEBUG_NN);
-  if (err != EI_IMPULSE_OK) {
-    ei_printf("ERROR: Failed to run classifier (%d)\n", err);
-    return;
-  }
-  // print the predictions
-  if (debug) {
-    ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d "
-              "ms.): \n",
-              ei_result.timing.dsp, ei_result.timing.classification,
-              ei_result.timing.anomaly);
-#if EI_CLASSIFIER_OBJECT_DETECTION == 1
-    bool bb_found = ei_result.bounding_boxes[0].value > 0;
+    SpNavData  NavData;
 
-    LED1_OFF
-    LED2_OFF
-    LED3_OFF
+    // Get the UTC time
+    Gnss.getNavData(&NavData);
+    SpGnssTime *time = &NavData.time;
 
-    spotted_object = true;
-    
-    for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
-      auto bb = ei_result.bounding_boxes[ix];
-      if (bb.value > score) {
-        score = bb.value;
-      }
-      
-      if (bb.value == 0) {
-        continue;
-      }
-      if (bb.value > 0.2) {
-        spotted_object = true;
-      }
-      if (bb.value > 0.7) {
-        LED1_ON
-      }
-      if (bb.value > 0.8) {
-        LED2_ON
-      }
-      if (bb.value > 0.9) {
-        LED3_ON
-      }
-      ei_printf("    %s (", bb.label);
-      ei_printf_float(bb.value);
-      ei_printf(") [ x: %u, y: %u, width: %u, height: %u ]\n", bb.x, bb.y,
-                bb.width, bb.height);
-    }
-
-    if (!bb_found) {
-      ei_printf("    No objects found\n");
-    }
-#else
-    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-      ei_printf("    %s: ", ei_result.classification[ix].label);
-      ei_printf_float(ei_result.classification[ix].value);
-      ei_printf("\n");
-    }
-#if EI_CLASSIFIER_HAS_ANOMALY == 1
-    ei_printf("    anomaly score: ");
-    ei_printf_float(ei_result.anomaly);
-    ei_printf("\n");
+    // Check if the acquired UTC time is accurate
+    if (time->year >= 2000) {
+      RtcTime now = RTC.getTime();
+      // Convert SpGnssTime to RtcTime
+      RtcTime gps(time->year, time->month, time->day,
+                  time->hour, time->minute, time->sec, time->usec * 1000);
+#ifdef MY_TIMEZONE_IN_SECONDS
+      // Set the time difference
+      gps += MY_TIMEZONE_IN_SECONDS;
 #endif
-#endif
-  }
-
-  return;
+      int diff = now - gps;
+      if (abs(diff) >= 1) {
+        RTC.setTime(gps);
+      }
+      Gnss.stop();
+      Gnss.end();
+      got_time = true;
+    }
+  
 }
 
-/**
- * @brief callback that checks for the presence of an animal in the camera
- * preview window, and then executes ei_wildlife_camera_snapshot() if found
- */
-void CamCB(CamImage img) {}
-
-/**
-   @brief initialize the wildlife camera for continuous monitoring of video feed
 */
-void ei_wildlife_camera_start_continuous(bool debug) {
-  CamErr err;
-  ei_printf("Starting the camera:\n");
-  err = theCamera.begin(1, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,
+/**
+ * @brief      Convert rgb565 data to rgb888
+ *
+ * @param[in]  src_buf  The rgb565 data
+ * @param      dst_buf  The rgb888 data
+ * @param      src_len  length of rgb565 data
+ */
+
+bool RBG565ToRGB888(uint8_t *src_buf, uint8_t *dst_buf, uint32_t src_len) {
+  uint8_t hb, lb;
+  uint32_t pix_count = src_len / 2;
+
+  for (uint32_t i = 0; i < pix_count; i++) {
+    // The Spresense Image Data appears to be written with a different Endiannes
+    // compared to the one on the Nicla Vision
+    lb = *src_buf++;
+    hb = *src_buf++;
+
+    *dst_buf++ = hb & 0xF8;
+    *dst_buf++ = (hb & 0x07) << 5 | (lb & 0xE0) >> 3;
+    *dst_buf++ = (lb & 0x1F) << 3;
+  }
+
+  return true;
+}
+
+
+
+
+static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
+  // we already have a RGB888 buffer, so recalculate offset into pixel index
+  size_t pixel_ix = offset * 3;
+  size_t pixels_left = length;
+  size_t out_ptr_ix = 0;
+
+  while (pixels_left != 0) {
+    out_ptr[out_ptr_ix] = (input_image[pixel_ix] << 16) +
+                          (input_image[pixel_ix + 1] << 8) +
+                          input_image[pixel_ix + 2];
+
+    // go to the next pixel
+    out_ptr_ix++;
+    pixel_ix += 3;
+    pixels_left--;
+  }
+
+  // and done!
+  return 0;
+}
+
+
+bool create_dir(String path) {
+  if (!SD.exists(path)) {
+    if (!SD.mkdir(path)) {
+      ei_printf("Failed to create dir: %s\n", path);
+      return false;
+    } else {
+      return true;
+    }
+  }
+  return true;
+}
+
+String create_topic_directory(String topic) {
+  RtcTime now = RTC.getTime();
+  char month_s[3];
+  char day_s[3];
+  bool success;
+  String path = "/";
+
+  sprintf(month_s, "%02d", now.month());
+  sprintf(day_s, "%02d", now.day());
+  path = String("/") + month_s;
+  if (!create_dir(path)) {
+    return String("/");
+  }
+  path = String("/") + month_s + "/" + day_s;
+  if (!create_dir(path)) {
+    return String("/");
+  }
+  path = String("/") + month_s + "/" + day_s + "/" + topic;
+  if (!create_dir(path)) {
+    return String("/");
+  }
+  return path;
+}
+
+void save_json(char * filename) {
+    char line[100];
+    bool first_obj = true;
+    if (SD.begin()) {
+    File myFile = SD.open(filename, FILE_WRITE);
+    myFile.println("{ \"results\": [");
+
+  for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
+    auto bb = ei_result.bounding_boxes[ix];
+    if (bb.value == 0) {
+      continue;
+    }
+    if (!first_obj) {
+    sprintf(line,",\n{\n\"label\": \"%s\",", bb.label);
+    } else {
+      sprintf(line,"{\n\"label\": \"%s\",", bb.label);
+    }
+    myFile.println(line);
+    sprintf(line,"\"confidence\": \"%f\",", bb.value);
+    myFile.println(line);
+    sprintf(line,"\"x\": \"%d\",", bb.x);
+    myFile.println(line);
+    sprintf(line,"\"y\": \"%d\",", bb.y);
+    myFile.println(line);
+    sprintf(line,"\"width\": \"%d\",", bb.width);
+    myFile.println(line);
+    sprintf(line,"\"height\": \"%d\"\n}", bb.height);
+    myFile.print(line);
+    first_obj = false;
+  }
+    myFile.println("\n]}");
+    myFile.close();
+
+    } else {
+    Serial.println("failed to save images, check that "
+                   "SD card is connected properly");
+  }
+}
+
+void save_results(float high_score) {
+  RtcTime now = RTC.getTime();
+  char csv_filename[400];
+  char input_filename[400];
+  char json_filename[400];
+  char raw_filename[400];
+  char line[1200];
+  String path;
+
+  if (SD.begin()) {
+
+    
+    
+    
+    
+   int short_score = floor(high_score * 100);
+    sprintf(csv_filename,"/log.csv");
+    path = create_topic_directory("detections");
+    sprintf(input_filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d.888", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
+         now.hour(), now.minute(), now.second());
+    sprintf(json_filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d.json", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
+         now.hour(), now.minute(), now.second());
+    path = create_topic_directory("raw");
+    sprintf(raw_filename, "%s/%d-%d %02d-%02d %02d_%02d_%02d-raw.888", path.c_str(),take_picture_count, short_score, now.month(), now.day(),
+         now.hour(), now.minute(), now.second());
+    ei_printf("INFO: saving %s to SD card... size: %d\n", input_filename,
+              INPUT_HEIGHT * INPUT_WIDTH * 3);
+    SD.remove(input_filename);
+    File myFile = SD.open(input_filename, FILE_WRITE);
+    myFile.write(input_image, INPUT_WIDTH * INPUT_HEIGHT * 3);
+    myFile.close();
+
+    save_json(json_filename);
+
+
+    ei_printf("INFO: saving %s to SD card... size: %d\n", raw_filename,
+              RAW_HEIGHT * RAW_WIDTH * 3);
+    SD.remove(raw_filename);
+    myFile = SD.open(raw_filename, FILE_WRITE);
+    myFile.write(raw_image, RAW_WIDTH * RAW_HEIGHT * 3);
+    myFile.close();
+
+    myFile = SD.open(csv_filename, FILE_WRITE);
+    sprintf(line, "%d, %d, %02d, %02d, %02d:%02d:%02d, %s, %s\n", take_picture_count, short_score, now.month(), now.day(),
+         now.hour(), now.minute(), now.second(), input_filename, json_filename);
+    myFile.write(line);
+    myFile.close();
+  } else {
+    Serial.println("failed to save images, check that "
+                   "SD card is connected properly");
+  }
+
+}
+
+
+void connect_lte_mqtt() {
+  char apn[LTE_NET_APN_MAXLEN] = APP_LTE_APN;
+  LTENetworkAuthType authtype = APP_LTE_AUTH_TYPE;
+  char user_name[LTE_NET_USER_MAXLEN] = APP_LTE_USER_NAME;
+  char password[LTE_NET_PASSWORD_MAXLEN] = APP_LTE_PASSWORD;
+
+ 
+  Serial.println("Starting HTTP client."); 
+
+
+  Serial.println("=========== APN information ===========");
+  Serial.print("Access Point Name  : ");
+  Serial.println(apn);
+  Serial.print("Authentication Type: ");
+  Serial.println(authtype == LTE_NET_AUTHTYPE_CHAP ? "CHAP" :
+                 authtype == LTE_NET_AUTHTYPE_NONE ? "NONE" : "PAP");
+  if (authtype != LTE_NET_AUTHTYPE_NONE) {
+    Serial.print("User Name          : ");
+    Serial.println(user_name);
+    Serial.print("Password           : ");
+    Serial.println(password);
+  }
+
+ while (true) {
+
+    // Power on the modem and Enable the radio function. 
+
+    if (lteAccess.begin() != LTE_SEARCHING) {
+      Serial.println("Could not transition to LTE_SEARCHING.");
+      Serial.println("Please check the status of the LTE board.");
+      for (;;) {
+        sleep(1);
+      }
+    }
+
+    // * The connection process to the APN will start.
+    // * If the synchronous parameter is false,
+    // * the return value will be returned when the connection process is started.
+    if (lteAccess.attach(APP_LTE_RAT,
+                         apn,
+                         user_name,
+                         password,
+                         authtype,
+                         APP_LTE_IP_TYPE) == LTE_READY) {
+      Serial.println("attach succeeded.");
+      break;
+    }
+
+    // * If the following logs occur frequently, one of the following might be a cause:
+    // * - APN settings are incorrect
+    // * - SIM is not inserted correctly
+    // * - If you have specified LTE_NET_RAT_NBIOT for APP_LTE_RAT,
+    // *   your LTE board may not support it.
+    // * - Rejected from LTE network
+     
+    Serial.println("An error has occurred. Shutdown and retry the network attach process after 1 second.");
+    lteAccess.shutdown();
+    sleep(1);
+  }
+
+    // Set local time (not UTC) obtained from the network to RTC.
+  
+  
+  RTC.begin();
+  unsigned long currentTime;
+  while(0 == (currentTime = lteAccess.getTime())) {
+    sleep(1);
+  }
+  RtcTime rtc(currentTime);
+  RTC.setTime(rtc);
+
+  
+  mqttClient.setUsernamePassword(mqtt_username, mqtt_password);
+  mqttClient.setId("woodley_place");
+  Serial.print("Attempting to connect to the MQTT broker: ");
+  Serial.println(broker);
+  while(!mqttClient.connect(broker, port)) {
+    Serial.print("MQTT connection failed! Error code = ");
+    Serial.println(mqttClient.connectError());
+    sleep(3);
+  }
+  Serial.println("You're connected to the MQTT broker!");
+  return;
+}
+void send_updated_count() {
+    LTEModemStatus lte_status = lteAccess.getStatus();
+    if (lte_status != LTE_READY) {
+      Serial.println("LTE Modem is not connected.\n Current status is:");
+      Serial.println(lte_status);
+      lteAccess.shutdown();
+      sleep(1);
+      connect_lte_mqtt();
+    }
+
+  Serial.print("Current client State: ");
+  Serial.println(mqttClient.connected());
+  Serial.print("Attempting to connect to the MQTT broker: ");
+  Serial.println(broker);
+  while(!mqttClient.connect(broker, port)) {
+    Serial.print("MQTT connection failed! Error code = ");
+    Serial.println(mqttClient.connectError());
+    sleep(3);
+  }
+  Serial.println("You're connected to the MQTT broker!");
+  
+      // Publish to broker
+    Serial.print("Sending message to topic: ");
+    Serial.println(topic);
+    Serial.print("Publish: ");
+    String jsonString = "{\"value\":" + String(bicycle_count)  + "}";
+    Serial.println(jsonString);
+
+    // send message, the Print interface can be used to set the message contents
+    mqttClient.beginMessage(topic);
+    mqttClient.print(jsonString);
+    //mqttClient.print(out);
+    mqttClient.endMessage();
+    delay(3000);
+}
+
+void analyze_results() {
+
+
+  /* if the confidence goes above the DETECTION_THRESHOLD, set tracking_object to TRUE and add to the bicycle count
+      the tracking_object is used to help make sure a bicycle doesn't get counted twice. It gets reset to false
+      when the confidence is below DETECTION_RESET_THRESHOLD */
+  bool save_image = false;
+  bool spotted_object = false;
+  static bool tracking_object = false;
+  bool reset_tracking = true;
+  float high_score = 0.0;
+    ei_printf("Predictions (DSP: %d ms., Classification: %d ms., Anomaly: %d "
+            "ms.): \n",
+            ei_result.timing.dsp, ei_result.timing.classification,
+            ei_result.timing.anomaly);
+
+  bool bb_found = ei_result.bounding_boxes[0].value > 0;
+
+  for (size_t ix = 0; ix < EI_CLASSIFIER_OBJECT_DETECTION_COUNT; ix++) {
+    auto bb = ei_result.bounding_boxes[ix];
+    if (bb.value == 0) {
+      continue;
+    }
+    if (bb.value > high_score) {
+      high_score = bb.value;
+    }
+    if (bb.value >= SAVE_THRESHOLD) {
+      save_image = true;
+    }
+
+    if (bb.value >= DETECTION_RESET_THRESHOLD) {
+      reset_tracking = false;
+    }
+    if (bb.value >= DETECTION_THRESHOLD) {
+      spotted_object = true;
+    }
+
+    ei_printf("    %s (", bb.label);
+    ei_printf_float(bb.value);
+    ei_printf(") [ x: %u, y: %u, width: %u, height: %u ]\n", bb.x, bb.y,
+              bb.width, bb.height);
+  }
+
+  if (!bb_found) {
+    ei_printf("    No objects found\n");
+  } 
+
+  if (save_image) {
+    save_results(high_score);
+  }
+
+  if (spotted_object) {
+    if (!tracking_object) {
+      tracking_object = true;
+      bicycle_count++;
+      send_updated_count();
+      ei_printf("Detected new bicycle, count is: %d\n", bicycle_count);
+      // add something here to write to a file
+    }
+  }
+
+  if (reset_tracking) {
+    tracking_object = false;
+  }
+}
+
+
+void setup_camera() {
+    CamErr err;
+    err = theCamera.begin(0, CAM_VIDEO_FPS_5, RAW_WIDTH, RAW_HEIGHT,
                         CAM_IMAGE_PIX_FMT_RGB565);
-
-  // err = theCamera.begin(1, CAM_VIDEO_FPS_5, EI_CLASSIFIER_INPUT_WIDTH,
-  // EI_CLASSIFIER_INPUT_HEIGHT,CAM_IMAGE_PIX_FMT_YUV422);
-  if (err && debug)
-    printError(err);
-
   theCamera.setAutoISOSensitivity(true);
   theCamera.setAutoWhiteBalance(true);
 
-  ei_printf("Starting sending data:\n");
-
-  // start streaming the preview images to the classifier
-  // err = theCamera.startStreaming(true, CamCB);
-
-  if (err)
-    printError(err);
-
-  ei_printf("Set format:\n");
-  // still image format must be jpeg to allow for compressed storage/transmit
-
   err = theCamera.setStillPictureImageFormat(RAW_WIDTH, RAW_HEIGHT,
-                                             CAM_IMAGE_PIX_FMT_YUV422); //CAM_IMAGE_PIX_FMT_RGB565);
-  // CAM_IMAGE_PIX_FMT_YUV422);
-  // CAM_IMAGE_PIX_FMT_RGB565);
-  // CAM_IMAGE_PIX_FMT_GRAY);
-  // CAM_IMAGE_PIX_FMT_RGB565);
-  if (err)
+                                             CAM_IMAGE_PIX_FMT_RGB565);
+
+    if (err)
     printError(err);
-
-  Serial.println("INFO: started wildlife camera recording");
-}
-
-void ei_capture_classify() {
-  CamErr err;
-  char filename[400];
-  bool debug = true;
-  // snapshot and save a jpeg
-  CamImage img = theCamera.takePicture();
-
-  if (!img.isAvailable())
-    return; // fast path if image is no longer ready
-
-  ei_printf("resize:\n");
-  err = img.clipAndResizeImageByHW(sized_img
-                                   , OFFSET_X, OFFSET_Y
-                                   , OFFSET_X + CLIP_WIDTH - 1
-                                   , OFFSET_Y + CLIP_HEIGHT - 1
-                                   , EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT);
-  if (err) printError(err);
-  err = sized_img.convertPixFormat(CAM_IMAGE_PIX_FMT_RGB565);
-  if (err) printError(err);
-  /*memcpy(features, img.getImgBuff(), img.getImgSize());
-
-  uint8_t r, g, b;
-  for (int i = 0; i < FEATURE_SIZE; i++) {
-    r565_to_rgb(features[i], &r, &g, &b);
-    // then convert to out_ptr format
-    float pixel_f = (r << 16) + (g << 8) + b;
-    features[i] = pixel_f;
-  }*/
-
-ei_wildlife_camera_classify(true);
-
-  LED0_ON
-
-  if (spotted_object && theSD.begin() && sized_img.isAvailable()) {
-    int short_score = floor(score * 100);
-    /*sprintf(filename, "%d-%d.rgb", take_picture_count, short_score);
-    if (debug)
-      ei_printf("INFO: saving %s to SD card... size: %d", filename, sizeof(features));
-    theSD.remove(filename);
-    File myFile = theSD.open(filename, FILE_WRITE);
-    myFile.write((const char*) features, sizeof(features));
-    myFile.close();*/
-
-    sprintf(filename, "%d-%d.565", take_picture_count, short_score);
-    if (debug)
-      ei_printf("INFO: saving %s to SD card... size: %d\n", filename, sized_img.getImgSize());
-    theSD.remove(filename);
-    File myFile = theSD.open(filename, FILE_WRITE);
-    myFile.write(sized_img.getImgBuff() ,sized_img.getImgSize());
-    myFile.close();
-  } else if (debug) {
-    Serial.println("failed to compress and save image, check that camera and "
-                   "SD card are connected properly");
-  }
-  LED0_OFF
-
-  
-
-
-  take_picture_count++;
-}
-
-
-void printClockMode() {
-  clockmode_e mode = LowPower.getClockMode();
-
-  Serial.println("--------------------------------------------------");
-  Serial.print("clock mode: ");
-  switch (mode) {
-  case CLOCK_MODE_156MHz:
-    Serial.println("156MHz");
-    break;
-  case CLOCK_MODE_32MHz:
-    Serial.println("32MHz");
-    break;
-  case CLOCK_MODE_8MHz:
-    Serial.println("8MHz");
-    break;
-  }
+    return;
 }
 
 void setup() {
 
-  if (DEBUG) {
-    Serial.begin(115200);
-    Serial.println("INFO: wildlife_camera initializing on wakeup...");
-  }
 
+  Serial.begin(115200);
+  Serial.println("INFO: wildlife_camera initializing on wakeup...");
+  connect_lte_mqtt();
   /* Initialize SD */
+  sleep(1);
 
-  while (!theSD.begin()) {
-
-    if (DEBUG)
-      Serial.println("Insert SD card.");
+  while (!SD.begin()) {
+    Serial.println("Insert SD card.");
   }
+
+
+  
 
   // summary of inferencing settings (from model_metadata.h)
   ei_printf("Inferencing settings:\n");
@@ -428,31 +557,89 @@ void setup() {
             sizeof(ei_classifier_inferencing_categories) /
                 sizeof(ei_classifier_inferencing_categories[0]));
   ei_printf("\tRaw Image Width: %d Height: %d\n", RAW_WIDTH, RAW_HEIGHT);
-#if defined(CMSIS_NN)
-  ei_printf("Enabled CMSIS_NN\n");
-#endif
-#if defined(EI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN)
-  ei_printf("Enabled EI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN : %d\n",
-            EI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN);
-#endif
-  /*LowPower.begin();
- // Set the highest clock mode
- printClockMode();
-LowPower.clockMode(CLOCK_MODE_156MHz);
-printClockMode();*/
-  /*if (sizeof(features) / sizeof(float) != EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE) {
-    ei_printf("The size of your 'features' array is not correct. Expected %lu "
-              "items, but had %lu\n",
-              EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE,
-              sizeof(features) / sizeof(float));
-    delay(1000);
-    return;
-  }*/
-  ei_wildlife_camera_start_continuous(DEBUG);
+
+  raw_image = (uint8_t *)malloc(RAW_WIDTH * RAW_HEIGHT * 3 + 32);
+  raw_image = (uint8_t *)ALIGN_PTR((uintptr_t)raw_image, 32);
+  if (raw_image == NULL) {
+    ei_printf("raw_image MALLOC FAILED!!\n");
+    exit(0);
+  }
+
+
+
+  input_image = (uint8_t *)malloc(RAW_WIDTH * RAW_HEIGHT * 3 + 32);
+  input_image = (uint8_t *)ALIGN_PTR((uintptr_t)input_image, 32);
+  if (input_image == NULL) {
+    ei_printf("input_image MALLOC FAILED!!\n");
+    exit(0);
+  }
+
+  // Initialize RTC at first
+  //RTC.begin();
+
+  // Initialize and start GNSS library
+ /* int ret;
+  ret = Gnss.begin();
+  assert(ret == 0);
+
+  ret = Gnss.start();
+  assert(ret == 0);*/
+
+  // I kept getting erros unless the Camera Setup was done last
+  setup_camera();
+  sleep(1);
+
+  ei_printf("Complete setup\n");
+  return;
 }
 
 void loop() {
-  // ei_capture_classify();
-  ei_capture_classify();
-  // sleep(500);
+  // put your main code here, to run repeatedly:
+  ei::signal_t signal;
+
+
+/*
+    // Wait for GNSS data
+  if (!got_time && Gnss.waitUpdate()) {
+    checkClock();
+  }
+
+*/
+  ei_printf("Top of the loop\n");
+  CamImage img = theCamera.takePicture();
+  if (!img.isAvailable()) {
+    ei_printf("ERR: Take Picture Failed!\n");
+    sleep(1);
+    theCamera.end();
+    sleep(1);
+    setup_camera();
+    return false; // fast path if image is no longer ready
+  }
+
+  signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
+  signal.get_data = &ei_camera_get_data;
+  ei_printf("Trying to convert\n");
+  bool converted =
+      RBG565ToRGB888(img.getImgBuff(), input_image, img.getImgSize());
+  if (!converted) {
+    ei_printf("ERR: Conversion failed\n");
+    return false;
+  } else {
+    ei_printf("Successfully converted to RGB888\n");
+  }
+  memcpy(raw_image, input_image, RAW_WIDTH * RAW_HEIGHT * 3 + 32);
+
+    ei::image::processing::crop_and_interpolate_rgb888(
+      input_image, RAW_WIDTH, RAW_HEIGHT, input_image,
+      EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT);
+  ei_printf("Cropped and converted\n");
+  EI_IMPULSE_ERROR err = run_classifier(&signal, &ei_result, false);
+  if (err != EI_IMPULSE_OK) {
+    ei_printf("ERROR: Failed to run classifier (%d)\n", err);
+    return;
+  }
+  // print the predictions
+  analyze_results();
+
+  take_picture_count++;
 }
